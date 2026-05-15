@@ -11,7 +11,6 @@ import {
   CellWidth,
   extractHyperlinkFromStyles,
   filterOutHyperlinkStyles,
-  markCopySourceRegion,
   markNoSelectRegion,
   OSC8_PREFIX,
   resetScreen,
@@ -64,7 +63,6 @@ export type Operation =
   | BlitOperation
   | ClearOperation
   | NoSelectOperation
-  | CopySourceOperation
   | ShiftOperation
 
 type WriteOperation = {
@@ -175,15 +173,6 @@ type NoSelectOperation = {
   region: Rectangle
 }
 
-type CopySourceOperation = {
-  type: 'copySource'
-  region: Rectangle
-  // Pool ID (interned by render-node-to-output before push). 0 is reserved
-  // for "no source override" — never emitted but kept legal in the type so
-  // pool migration doesn't have to special-case stale ops.
-  id: number
-}
-
 export default class Output {
   width: number
   height: number
@@ -256,36 +245,6 @@ export default class Output {
    */
   noSelect(region: Rectangle): void {
     this.operations.push({ type: 'noSelect', region })
-  }
-
-  /**
-   * Intern a copy-source string into the screen's pool, returning the
-   * stable ID render-node-to-output passes to copySource(). Pulled out
-   * so callers don't need to reach into screen internals.
-   */
-  internCopySource(source: string): number {
-    return this.screen.copySourcePool.intern(source)
-  }
-
-  /**
-   * Mark a region with a copy-source ID. When the user selects cells
-   * in this region and copies, getSelectedText substitutes the source
-   * string from the screen's copySourcePool instead of the rendered
-   * cell text. Used to round-trip markdown / hyperlink / fence syntax
-   * that the renderer strips before writing chars to the screen.
-   *
-   * Caller is responsible for interning the source string into the
-   * screen's copySourcePool before calling this and passing the ID.
-   * Applied AFTER blit/write/noSelect so the mapping wins regardless
-   * of what's rendered into the region.
-   */
-  copySource(region: Rectangle, id: number): void {
-    if (id === 0) {
-      // Skip the no-op; resetScreen already cleared copySources to 0.
-      return
-    }
-
-    this.operations.push({ type: 'copySource', region, id })
   }
 
   write(x: number, y: number, text: string, softWrap?: boolean[]): void {
@@ -606,9 +565,6 @@ export default class Output {
       if (operation.type === 'noSelect') {
         const { x, y, width, height } = operation.region
         markNoSelectRegion(screen, x, y, width, height)
-      } else if (operation.type === 'copySource') {
-        const { x, y, width, height } = operation.region
-        markCopySourceRegion(screen, x, y, width, height, operation.id)
       }
     }
 

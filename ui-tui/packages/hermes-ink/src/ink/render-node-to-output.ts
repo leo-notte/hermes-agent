@@ -663,28 +663,6 @@ function renderNodeToOutput(
         })
       }
 
-      // Mark this box's region with a copy-source string. When the user
-      // copies cells inside this region, getSelectedText substitutes
-      // node.style.copySource for the rendered cell text. Used by
-      // <Md>/<MessageLine> to round-trip raw markdown that the renderer
-      // strips before writing chars to the screen (`**bold**` → `bold`,
-      // headings drop `#`, fences drop ```, etc.).
-      //
-      // Like noSelect: re-emitted every render path AND preserved across
-      // blits via blitRegion copying the copySources Int32 array.
-      if (node.style.copySource) {
-        const id = output.internCopySource(node.style.copySource)
-        output.copySource(
-          {
-            x: Math.floor(x),
-            y: Math.floor(y),
-            width: Math.floor(width),
-            height: Math.floor(height)
-          },
-          id
-        )
-      }
-
       const overflowX = node.style.overflowX ?? node.style.overflow
       const overflowY = node.style.overflowY ?? node.style.overflow
       const clipHorizontally = overflowX === 'hidden' || overflowX === 'scroll'

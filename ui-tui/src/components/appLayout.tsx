@@ -126,6 +126,7 @@ const TranscriptPane = memo(function TranscriptPane({
                   detailsModeCommandOverride={ui.detailsModeCommandOverride}
                   limitHistoryRender={row.index < transcript.historyItems.length - FULL_RENDER_TAIL_ITEMS}
                   msg={row.msg}
+                  msgId={row.key}
                   sections={ui.sections}
                   t={ui.theme}
                 />

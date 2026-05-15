@@ -160,6 +160,16 @@ export default class Ink {
   // Ignore last render after unmounting a tree to prevent empty output before exit
   private isUnmounted = false
   private isPaused = false
+  /**
+   * Optional host-provided override for selection→clipboard-text. When set,
+   * `copySelection*` calls this instead of the default cell-extracting
+   * getSelectedText. Used by the transcript-virtual copy-source pipeline
+   * to emit raw markdown / source text instead of rendered cells.
+   *
+   * Receives the Ink instance so the override can read `this.rootNode`,
+   * `this.selection`, `this.frontFrame.screen`, etc.
+   */
+  private copyTextFn: ((self: Ink) => string) | null = null
   private readonly container: FiberRoot
   private rootNode: dom.DOMElement
   readonly focusManager: FocusManager
@@ -1375,7 +1385,9 @@ export default class Ink {
       return ''
     }
 
-    const text = getSelectedText(this.selection, this.frontFrame.screen)
+    const text = this.copyTextFn
+      ? this.copyTextFn(this)
+      : getSelectedText(this.selection, this.frontFrame.screen)
 
     if (text) {
       try {
@@ -1673,6 +1685,30 @@ export default class Ink {
   /** Whether there is an active text selection. */
   hasTextSelection(): boolean {
     return hasSelection(this.selection)
+  }
+  /**
+   * Install (or clear) the host-provided copy-text override. Called by
+   * the TUI host once on mount to wire up the transcript-virtual
+   * copy-source pipeline. Pass null to revert to the default cell-text
+   * extraction behavior.
+   */
+  setCopyTextFn(fn: ((self: Ink) => string) | null): void {
+    this.copyTextFn = fn
+  }
+  /**
+   * Read access to the rendered root DOM tree. Used by the copy-text
+   * override to walk for `copyRangeId` tagged boxes.
+   */
+  getRootDom(): dom.DOMElement {
+    return this.rootNode
+  }
+  /**
+   * Read access to the current selection's screen-coord bounds. Used by
+   * the copy-text override to know which ranges/cells the selection
+   * covers. Returns null when no selection.
+   */
+  getSelectionBoundsScreen(): { start: { col: number; row: number }; end: { col: number; row: number } } | null {
+    return selectionBounds(this.selection)
   }
 
   getSelectionVersion(): number {

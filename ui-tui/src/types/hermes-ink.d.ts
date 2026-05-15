@@ -75,6 +75,20 @@ declare module '@hermes/ink' {
     readonly cleanup: () => void
   }
 
+  /**
+   * Live Ink instance reference passed to copy-text overrides + exposed
+   * by `useInkInstance()`. Surfaces the minimum API needed for
+   * transcript-virtual selection/copy.
+   */
+  export type InkInstance = {
+    readonly setCopyTextFn: (fn: ((self: InkInstance) => string) | null) => void
+    readonly getRootDom: () => unknown
+    readonly getSelectionBoundsScreen: () =>
+      | { readonly start: { readonly col: number; readonly row: number }; readonly end: { readonly col: number; readonly row: number } }
+      | null
+    readonly hasTextSelection: () => boolean
+  }
+
   export type ScrollBoxHandle = {
     readonly scrollTo: (y: number) => void
     readonly scrollBy: (dy: number) => void
@@ -133,6 +147,11 @@ declare module '@hermes/ink' {
   export function evictInkCaches(level?: EvictLevel): InkCacheSizes
 
   export function forceRedraw(stdout?: NodeJS.WriteStream): boolean
+  export function getInkForStdout(stdout?: NodeJS.WriteStream): InkInstance | null
+  export function copyPointAt(rootDom: unknown, col: number, row: number):
+    | { kind: 'in-range'; rangeId: number; visualLine: number; col: number }
+    | { kind: 'gap'; afterRangeId: null | number; beforeRangeId: null | number }
+  export function findRangeDom(rootDom: unknown, id: number): unknown
   export function render(node: React.ReactNode, options?: NodeJS.WriteStream | RenderOptions): Instance
 
   export function useApp(): { readonly exit: (error?: Error) => void }

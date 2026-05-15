@@ -42,6 +42,7 @@ export const StreamingAssistant = memo(function StreamingAssistant({
           detailsModeCommandOverride={detailsModeCommandOverride}
           key={`seg:${i}`}
           msg={msg}
+          msgId={`streaming:seg:${i}`}
           sections={sections}
           t={ui.theme}
         />
@@ -72,6 +73,7 @@ export const StreamingAssistant = memo(function StreamingAssistant({
             text: streaming,
             ...(streamPendingTools.length && { tools: streamPendingTools })
           }}
+          msgId="streaming:live"
           sections={sections}
           t={ui.theme}
         />

@@ -1,4 +1,4 @@
-import { useApp, useHasSelection, useSelection, useStdout, useTerminalTitle, type ScrollBoxHandle } from '@hermes/ink'
+import { getInkForStdout, type ScrollBoxHandle, useApp, useHasSelection, useSelection, useStdout, useTerminalTitle } from '@hermes/ink'
 import { useStore } from '@nanostores/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
@@ -16,6 +16,9 @@ import type {
 } from '../gatewayTypes.js'
 import { useGitBranch } from '../hooks/useGitBranch.js'
 import { useVirtualHistory } from '../hooks/useVirtualHistory.js'
+import { makeCopyTextFn } from '../lib/copySource/buildCopyTextFromDom.js'
+import { evictMessage } from '../lib/copySource/registry.js'
+import type { MsgSnapshot } from '../lib/copySource/types.js'
 import { composerPromptWidth } from '../lib/inputMetrics.js'
 import { appendTranscriptMessage } from '../lib/messages.js'
 import { DEFAULT_VOICE_RECORD_KEY, isMac, type ParsedVoiceRecordKey } from '../lib/platform.js'
@@ -237,6 +240,67 @@ export function useMainApp(gw: GatewayClient) {
     () => historyItems.map((msg, index) => ({ index, key: messageId(msg), msg })),
     [historyItems, messageId]
   )
+
+  // ── Copy-source pipeline wiring ────────────────────────────────────────
+  // The transcript-virtual copy-source registry needs three things from
+  // the host (`useMainApp`):
+  //   1. A getter for the current msg ordering, so toCopyText can sort
+  //      ranges in document order.
+  //   2. Eviction of registry entries whose msgs have been popped from
+  //      history (history-cap, /undo, /clear). Without this, stale
+  //      ranges accumulate forever.
+  //   3. Installation of the copy-text override on the live Ink instance,
+  //      once at mount, so ctrl-c uses the transcript-virtual pipeline
+  //      instead of cell extraction.
+  //
+  // The transcriptRef + makeCopyTextFn pattern decouples the closure-
+  // captured transcript at install time from the live transcript at copy
+  // time — without the ref the override would always see the empty
+  // initial array.
+  const transcriptRef = useRef<MsgSnapshot[]>([])
+
+  // Keep transcriptRef in sync with the latest virtualRows. Runs in an
+  // effect rather than the render body so react-compiler is happy (writing
+  // to a ref outside an effect is a foot-gun in concurrent React even
+  // though refs don't trigger re-renders).
+  useEffect(() => {
+    transcriptRef.current = virtualRows.map((row, idx) => ({ id: row.key, order: idx }))
+  }, [virtualRows])
+
+  // Track which msgIds are currently mounted so eviction fires for the
+  // delta on each render. Plain string Set is enough — msgIds are stable
+  // strings allocated by `messageId()`.
+  const liveMsgIdsRef = useRef<Set<string>>(new Set())
+
+  useEffect(() => {
+    const current = new Set(virtualRows.map(r => r.key))
+
+    for (const id of liveMsgIdsRef.current) {
+      if (!current.has(id)) {
+        evictMessage(id)
+      }
+    }
+
+    liveMsgIdsRef.current = current
+  }, [virtualRows])
+
+  // One-time install of the copy-text override on the Ink instance. The
+  // override reads transcriptRef so it always sees the latest msg list
+  // even though it's installed only once.
+  useEffect(() => {
+    const ink = getInkForStdout(stdout)
+
+    if (!ink) {
+      return
+    }
+
+    const fn = makeCopyTextFn(() => transcriptRef.current)
+    ink.setCopyTextFn(fn)
+
+    return () => {
+      ink.setCopyTextFn(null)
+    }
+  }, [stdout])
 
   const detailsLayoutKey = useMemo(() => {
     const thinking = sectionMode('thinking', ui.detailsMode, ui.sections, ui.detailsModeCommandOverride)
@@ -730,10 +794,13 @@ export function useMainApp(gw: GatewayClient) {
   const anyPanelVisible = SECTION_NAMES.some(
     s => sectionMode(s, ui.detailsMode, ui.sections, ui.detailsModeCommandOverride) !== 'hidden'
   )
+
   const thinkingPanelVisible =
     sectionMode('thinking', ui.detailsMode, ui.sections, ui.detailsModeCommandOverride) !== 'hidden'
+
   const toolsPanelVisible =
     sectionMode('tools', ui.detailsMode, ui.sections, ui.detailsModeCommandOverride) !== 'hidden'
+
   const activityPanelVisible =
     sectionMode('activity', ui.detailsMode, ui.sections, ui.detailsModeCommandOverride) !== 'hidden'
 

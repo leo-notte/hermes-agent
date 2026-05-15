@@ -128,7 +128,7 @@ export const findStableBoundary = (text: string) => {
   return -1
 }
 
-export const StreamingMd = memo(function StreamingMd({ compact, t, text }: StreamingMdProps) {
+export const StreamingMd = memo(function StreamingMd({ compact, msgId, t, text }: StreamingMdProps) {
   const stablePrefixRef = useRef('')
 
   // Reset if the text no longer starts with our recorded prefix (defensive;
@@ -150,24 +150,36 @@ export const StreamingMd = memo(function StreamingMd({ compact, t, text }: Strea
   const stablePrefix = stablePrefixRef.current
   const unstableSuffix = text.slice(stablePrefix.length)
 
+  // Suffix blockIndexBase is offset by SUFFIX_BLOCK_OFFSET so its blocks
+  // order AFTER the prefix's in document order, regardless of how many
+  // blocks the prefix has. 1_000_000 is comfortably above any realistic
+  // prefix block count (would need a million top-level markdown blocks
+  // in one message to collide; chat messages cap at thousands of lines).
+  const SUFFIX_BLOCK_OFFSET = 1_000_000
+
   if (!stablePrefix) {
-    return <Md compact={compact} t={t} text={unstableSuffix} />
+    return <Md compact={compact} msgId={msgId} t={t} text={unstableSuffix} />
   }
 
   if (!unstableSuffix) {
-    return <Md compact={compact} t={t} text={stablePrefix} />
+    return <Md compact={compact} msgId={msgId} t={t} text={stablePrefix} />
   }
 
   return (
     <Box flexDirection="column">
-      <Md compact={compact} t={t} text={stablePrefix} />
-      <Md compact={compact} t={t} text={unstableSuffix} />
+      <Md compact={compact} msgId={msgId} t={t} text={stablePrefix} />
+      <Md blockIndexBase={SUFFIX_BLOCK_OFFSET} compact={compact} msgId={msgId} t={t} text={unstableSuffix} />
     </Box>
   )
 })
 
 interface StreamingMdProps {
   compact?: boolean
+  /** Message id this stream belongs to. Threaded into both Md subtrees so
+   * the prefix and suffix blocks register under the same msgId in the
+   * copy-source registry. Selection that spans both halves copies the raw
+   * source seamlessly across the boundary. */
+  msgId?: string
   t: Theme
   text: string
 }

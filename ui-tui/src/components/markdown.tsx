@@ -1,6 +1,8 @@
 import { Box, Link, stringWidth, Text } from '@hermes/ink'
 import { Fragment, memo, type ReactNode, useMemo } from 'react'
 
+import { CopySource } from '../lib/copySource/CopySource.js'
+import { buildLineStartsFromRows, simpleOffsetFor } from '../lib/copySource/offsetMaps.js'
 import { ensureEmojiPresentation } from '../lib/emoji.js'
 import { BOX_CLOSE, BOX_OPEN, texToUnicode } from '../lib/mathUnicode.js'
 import { highlightLine, isHighlightable } from '../lib/syntax.js'
@@ -336,7 +338,7 @@ function MdInline({ t, text }: { t: Theme; text: string }) {
 // on remount, so virtualization re-parses every row that scrolls back into
 // view. Theme-keyed WeakMap drops stale palettes; inner Map is LRU-bounded.
 const MD_CACHE_LIMIT = 512
-const mdCache = new WeakMap<Theme, Map<string, ReactNode[]>>()
+const mdCache = new WeakMap<Theme, Map<string, MdBlock[]>>()
 
 const cacheBucket = (t: Theme) => {
   const b = mdCache.get(t)
@@ -345,13 +347,13 @@ const cacheBucket = (t: Theme) => {
     return b
   }
 
-  const fresh = new Map<string, ReactNode[]>()
+  const fresh = new Map<string, MdBlock[]>()
   mdCache.set(t, fresh)
 
   return fresh
 }
 
-const cacheGet = (b: Map<string, ReactNode[]>, key: string) => {
+const cacheGet = (b: Map<string, MdBlock[]>, key: string) => {
   const v = b.get(key)
 
   if (v) {
@@ -362,7 +364,7 @@ const cacheGet = (b: Map<string, ReactNode[]>, key: string) => {
   return v
 }
 
-const cacheSet = (b: Map<string, ReactNode[]>, key: string, v: ReactNode[]) => {
+const cacheSet = (b: Map<string, MdBlock[]>, key: string, v: MdBlock[]) => {
   b.set(key, v)
 
   if (b.size > MD_CACHE_LIMIT) {
@@ -370,552 +372,594 @@ const cacheSet = (b: Map<string, ReactNode[]>, key: string, v: ReactNode[]) => {
   }
 }
 
-function MdImpl({ compact, t, text }: MdProps) {
-  const nodes = useMemo(() => {
-    const bucket = cacheBucket(t)
-    const cacheKey = `${compact ? '1' : '0'}|${text}`
-    const cached = cacheGet(bucket, cacheKey)
+function MdImpl({ blockIndexBase = 1, compact, msgId, t, text }: MdProps) {
+  const blocks = useMemo(() => parseToBlocks(text, compact, t), [compact, t, text])
 
-    if (cached) {
-      return cached
+  if (!msgId) {
+    // Recursive Md call (e.g. nested ```md fence) — caller's CopySource
+    // already covers our source range; emit blocks flat without wrapping.
+    return (
+      <Box flexDirection="column">
+        {blocks.map((b, i) => (
+          <Fragment key={i}>{b.content}</Fragment>
+        ))}
+      </Box>
+    )
+  }
+
+  // Outer Md call: each block gets its own <CopySource> so partial-block
+  // selections round-trip the raw markdown for THAT block, and the
+  // fence-stripping rule fires when a selection lands entirely inside
+  // one fence's inner content.
+  return (
+    <Box flexDirection="column">
+      {blocks.map((b, i) => {
+        const lineRows = b.source.split('\n')
+        const rowStarts = buildLineStartsFromRows(lineRows)
+
+        return (
+          <CopySource
+            blockIndex={blockIndexBase + i}
+            getOffset={simpleOffsetFor(b.source, rowStarts)}
+            innerOffset={b.innerOffset}
+            innerSource={b.innerSource}
+            key={i}
+            msgId={msgId}
+            outerSource={b.source}
+            visualLineCount={Math.max(1, lineRows.length)}
+          >
+            {b.content}
+          </CopySource>
+        )
+      })}
+    </Box>
+  )
+}
+
+/**
+ * Parse markdown text into a list of blocks, each carrying its raw source
+ * and rendered ReactNode content. Cached on (compact, text) per theme so
+ * repeated renders of the same message don't re-tokenize.
+ *
+ * Why blocks-not-nodes-not-React: the CopySource wrapping needs the raw
+ * source per block, which is intrinsically tied to the parse pass — the
+ * parser is the only place that knows where each block starts and ends.
+ * Caching nodes instead would require re-deriving block sources post-hoc.
+ */
+function parseToBlocks(text: string, compact: boolean | undefined, t: Theme): MdBlock[] {
+  const bucket = cacheBucket(t)
+  const cacheKey = `${compact ? '1' : '0'}|${text}`
+  const cached = cacheGet(bucket, cacheKey)
+
+  if (cached) {
+    return cached
+  }
+
+  const lines = ensureEmojiPresentation(text).split('\n')
+  const blocks: MdBlock[] = []
+
+  let prevKind: Kind = null
+  let i = 0
+  let key = 0
+
+  const push = (content: ReactNode, source: string, extra?: Partial<MdBlock>): void => {
+    blocks.push({ content, source, ...extra })
+    key++
+  }
+
+  const gap = () => {
+    if (blocks.length && prevKind !== 'blank') {
+      push(<Text> </Text>, '')
+      prevKind = 'blank'
+    }
+  }
+
+  const start = (kind: Exclude<Kind, null | 'blank'>) => {
+    if (prevKind && prevKind !== 'blank' && prevKind !== kind) {
+      gap()
     }
 
-    const lines = ensureEmojiPresentation(text).split('\n')
-    const nodes: ReactNode[] = []
-    // Parallel array: nodeRanges[k] = { start, end } means nodes[k] (and any
-    // contiguous run sharing the same range) was emitted by the block
-    // covering source lines [start..end). Used after the parse to wrap
-    // each block's rendered nodes in a <Box copySource=...> so partial
-    // selections of an individual block (one paragraph, one heading, one
-    // code fence) round-trip the raw markdown for THAT block.
-    //
-    // Outer msg-level copySource on <MessageLine> covers the whole
-    // message; the per-block wraps shadow it only when the selection
-    // covers a single block (see computeFullyCoveredCopySources's
-    // containment check).
-    const nodeRanges: Array<{ end: number; start: number } | null> = []
+    prevKind = kind
+  }
 
-    let prevKind: Kind = null
-    let i = 0
+  while (i < lines.length) {
+    const line = lines[i]!
+    const blockStart = i
 
-    const gap = () => {
-      if (nodes.length && prevKind !== 'blank') {
-        nodes.push(<Text key={`gap-${nodes.length}`}> </Text>)
-        prevKind = 'blank'
-      }
-    }
-
-    const start = (kind: Exclude<Kind, null | 'blank'>) => {
-      if (prevKind && prevKind !== 'blank' && prevKind !== kind) {
+    if (!line.trim()) {
+      if (!compact) {
         gap()
       }
 
-      prevKind = kind
-    }
-
-    while (i < lines.length) {
-      // Track this iteration's block range so we can wrap whatever it
-      // pushes in a <Box copySource=...> covering the raw source lines.
-      // Selection that fully covers this block's rendered cells will
-      // copy the original markdown (asterisks, fences, headings, etc.)
-      // instead of the stripped render. Outer msg-level copySource on
-      // <MessageLine> still wins for whole-message selections via the
-      // shadowing logic in getSelectedText.
-      const blockStart = i
-      const beforeCount = nodes.length
-
-      // Labeled inner block: each branch's `break blockIter` exits to
-      // the wrap step below instead of skipping it (which a plain
-      // `continue` on the outer while would do). The branches still
-      // advance `i` themselves so the loop progresses normally.
-       
-      blockIter: {
-        const line = lines[i]!
-        const key = nodes.length
-
-      if (!line.trim()) {
-        if (!compact) {
-          gap()
-        }
-
-        i++
-
-        break blockIter
-      }
-
-      if (AUDIO_DIRECTIVE_RE.test(line)) {
-        i++
-
-        break blockIter
-      }
-
-      const media = line.match(MEDIA_LINE_RE)?.[1]
-
-      if (media) {
-        start('paragraph')
-        nodes.push(
-          <Text color={t.color.muted} key={key} wrap="wrap-trim">
-            {'▸ '}
-
-            <Link url={/^(?:\/|[a-z]:[\\/])/i.test(media) ? `file://${media}` : media}>
-              <Text color={t.color.accent} underline>
-                {media}
-              </Text>
-            </Link>
-          </Text>
-        )
-        i++
-
-        break blockIter
-      }
-
-      const fence = line.match(FENCE_RE)
-
-      if (fence) {
-        const char = fence[1]![0] as '`' | '~'
-        const len = fence[1]!.length
-        const lang = fence[2]!.trim().toLowerCase()
-        const block: string[] = []
-
-        for (i++; i < lines.length; i++) {
-          const close = lines[i]!.match(FENCE_CLOSE_RE)?.[1]
-
-          if (close && close[0] === char && close.length >= len) {
-            break
-          }
-
-          block.push(lines[i]!)
-        }
-
-        if (i < lines.length) {
-          i++
-        }
-
-        if (['md', 'markdown'].includes(lang)) {
-          start('paragraph')
-          nodes.push(<Md compact={compact} key={key} t={t} text={block.join('\n')} />)
-
-          break blockIter
-        }
-
-        start('code')
-
-        const isDiff = lang === 'diff'
-        const highlighted = !isDiff && isHighlightable(lang)
-
-        nodes.push(
-          <Box flexDirection="column" key={key} paddingLeft={2}>
-            {lang && !isDiff && <Text color={t.color.muted}>{'─ ' + lang}</Text>}
-
-            {block.map((l, j) => {
-              if (highlighted) {
-                return (
-                  <Text key={j}>
-                    {highlightLine(l, lang, t).map(([color, text], kk) =>
-                      color ? (
-                        <Text color={color} key={kk}>
-                          {text}
-                        </Text>
-                      ) : (
-                        <Text key={kk}>{text}</Text>
-                      )
-                    )}
-                  </Text>
-                )
-              }
-
-              const add = isDiff && l.startsWith('+')
-              const del = isDiff && l.startsWith('-')
-              const hunk = isDiff && l.startsWith('@@')
-
-              return (
-                <Text
-                  backgroundColor={add ? t.color.diffAdded : del ? t.color.diffRemoved : undefined}
-                  color={add ? t.color.diffAddedWord : del ? t.color.diffRemovedWord : hunk ? t.color.muted : undefined}
-                  dimColor={isDiff && !add && !del && !hunk && l.startsWith(' ')}
-                  key={j}
-                >
-                  {l}
-                </Text>
-              )
-            })}
-          </Box>
-        )
-
-        break blockIter
-      }
-
-      const mathOpen = line.match(MATH_BLOCK_OPEN_RE)
-
-      if (mathOpen) {
-        const opener = mathOpen[1]!
-        const closeRe = opener === '$$' ? MATH_BLOCK_CLOSE_DOLLAR_RE : MATH_BLOCK_CLOSE_BRACKET_RE
-        const headRest = mathOpen[2] ?? ''
-        const block: string[] = []
-
-        // Single-line block: `$$x + y = z$$` or `\[x\]`. Capture inner content
-        // and emit the block immediately. Without this, the close-scan loop
-        // skips line `i` and treats the next opener as our closer, swallowing
-        // every paragraph in between.
-        const sameLineClose = headRest.match(closeRe)
-
-        if (sameLineClose) {
-          const inner = sameLineClose[1]!.trim()
-
-          start('code')
-          nodes.push(
-            <Box flexDirection="column" key={key} paddingLeft={2}>
-              {inner ? <Text color={t.color.accent}>{renderMath(texToUnicode(inner))}</Text> : null}
-            </Box>
-          )
-          i++
-
-          break blockIter
-        }
-
-        // Multi-line block: scan ahead for a real closer before committing.
-        // If none exists in the rest of the document, render this line as a
-        // paragraph instead of consuming everything that follows.
-        let closeIdx = -1
-
-        for (let j = i + 1; j < lines.length; j++) {
-          if (closeRe.test(lines[j]!)) {
-            closeIdx = j
-
-            break
-          }
-        }
-
-        if (closeIdx < 0) {
-          start('paragraph')
-          nodes.push(<MdInline key={key} t={t} text={line} />)
-          i++
-
-          break blockIter
-        }
-
-        if (headRest.trim()) {
-          block.push(headRest)
-        }
-
-        for (let j = i + 1; j < closeIdx; j++) {
-          block.push(lines[j]!)
-        }
-
-        const tail = lines[closeIdx]!.match(closeRe)![1]!.trimEnd()
-
-        if (tail.trim()) {
-          block.push(tail)
-        }
-
-        start('code')
-        nodes.push(
-          <Box flexDirection="column" key={key} paddingLeft={2}>
-            {block.map((l, j) => (
-              <Text color={t.color.accent} key={j}>
-                {renderMath(texToUnicode(l))}
-              </Text>
-            ))}
-          </Box>
-        )
-        i = closeIdx + 1
-
-        break blockIter
-      }
-
-      const heading = line.match(HEADING_RE)?.[2]
-
-      if (heading) {
-        start('heading')
-        nodes.push(
-          <Text bold color={t.color.accent} key={key} wrap="wrap-trim">
-            <MdInline t={t} text={heading} />
-          </Text>
-        )
-        i++
-
-        break blockIter
-      }
-
-      if (i + 1 < lines.length && SETEXT_RE.test(lines[i + 1]!)) {
-        start('heading')
-        nodes.push(
-          <Text bold color={t.color.accent} key={key} wrap="wrap-trim">
-            <MdInline t={t} text={line.trim()} />
-          </Text>
-        )
-        i += 2
-
-        break blockIter
-      }
-
-      if (HR_RE.test(line)) {
-        start('rule')
-        nodes.push(
-          <Text color={t.color.muted} key={key}>
-            {'─'.repeat(36)}
-          </Text>
-        )
-        i++
-
-        break blockIter
-      }
-
-      const footnote = line.match(FOOTNOTE_RE)
-
-      if (footnote) {
-        start('list')
-        nodes.push(
-          <Text color={t.color.muted} key={key} wrap="wrap-trim">
-            [{footnote[1]}] <MdInline t={t} text={footnote[2] ?? ''} />
-          </Text>
-        )
-        i++
-
-        while (i < lines.length && /^\s{2,}\S/.test(lines[i]!)) {
-          nodes.push(
-            <Box key={`${key}-cont-${i}`} paddingLeft={2}>
-              <Text color={t.color.muted} wrap="wrap-trim">
-                <MdInline t={t} text={lines[i]!.trim()} />
-              </Text>
-            </Box>
-          )
-          i++
-        }
-
-        break blockIter
-      }
-
-      if (i + 1 < lines.length && DEF_RE.test(lines[i + 1]!)) {
-        start('list')
-        nodes.push(
-          <Text bold key={key} wrap="wrap-trim">
-            {line.trim()}
-          </Text>
-        )
-        i++
-
-        while (i < lines.length) {
-          const def = lines[i]!.match(DEF_RE)?.[1]
-
-          if (!def) {
-            break
-          }
-
-          nodes.push(
-            <Text key={`${key}-def-${i}`} wrap="wrap-trim">
-              <Text color={t.color.muted}> · </Text>
-              <MdInline t={t} text={def} />
-            </Text>
-          )
-          i++
-        }
-
-        break blockIter
-      }
-
-      const bullet = line.match(BULLET_RE)
-
-      if (bullet) {
-        start('list')
-
-        const task = bullet[2]!.match(TASK_RE)
-        const marker = task ? (task[1]!.toLowerCase() === 'x' ? '☑' : '☐') : '•'
-
-        nodes.push(
-          <Box key={key} paddingLeft={indentDepth(bullet[1]!) * 2}>
-            <Text wrap="wrap-trim">
-              <Text color={t.color.muted}>{marker} </Text>
-              <MdInline t={t} text={task ? task[2]! : bullet[2]!} />
-            </Text>
-          </Box>
-        )
-        i++
-
-        break blockIter
-      }
-
-      const numbered = line.match(NUMBERED_RE)
-
-      if (numbered) {
-        start('list')
-        nodes.push(
-          <Box key={key} paddingLeft={indentDepth(numbered[1]!) * 2}>
-            <Text wrap="wrap-trim">
-              <Text color={t.color.muted}>{numbered[2]}. </Text>
-              <MdInline t={t} text={numbered[3]!} />
-            </Text>
-          </Box>
-        )
-        i++
-
-        break blockIter
-      }
-
-      if (QUOTE_RE.test(line)) {
-        start('quote')
-
-        const quoteLines: Array<{ depth: number; text: string }> = []
-
-        while (i < lines.length && QUOTE_RE.test(lines[i]!)) {
-          const prefix = lines[i]!.match(QUOTE_RE)?.[0] ?? ''
-
-          quoteLines.push({ depth: (prefix.match(/>/g) ?? []).length, text: lines[i]!.slice(prefix.length) })
-          i++
-        }
-
-        nodes.push(
-          <Box flexDirection="column" key={key}>
-            {quoteLines.map((ql, qi) => (
-              <Box key={qi} paddingLeft={Math.max(0, ql.depth - 1) * 2}>
-                <Text color={t.color.muted} wrap="wrap-trim">
-                  │ <MdInline t={t} text={ql.text} />
-                </Text>
-              </Box>
-            ))}
-          </Box>
-        )
-
-        break blockIter
-      }
-
-      if (line.includes('|') && i + 1 < lines.length && isTableDivider(lines[i + 1]!)) {
-        start('table')
-
-        const rows: string[][] = [splitRow(line)]
-
-        for (i += 2; i < lines.length && lines[i]!.includes('|') && lines[i]!.trim(); i++) {
-          rows.push(splitRow(lines[i]!))
-        }
-
-        nodes.push(renderTable(key, rows, t))
-
-        break blockIter
-      }
-
-      if (/^<\/?details\b/i.test(line)) {
-        i++
-
-        break blockIter
-      }
-
-      const summary = line.match(/^<summary>(.*?)<\/summary>$/i)?.[1]
-
-      if (summary) {
-        start('paragraph')
-        nodes.push(
-          <Text color={t.color.muted} key={key} wrap="wrap-trim">
-            ▶ {summary}
-          </Text>
-        )
-        i++
-
-        break blockIter
-      }
-
-      if (/^<\/?[^>]+>$/.test(line.trim())) {
-        start('paragraph')
-        nodes.push(
-          <Text color={t.color.muted} key={key} wrap="wrap-trim">
-            {line.trim()}
-          </Text>
-        )
-        i++
-
-        break blockIter
-      }
-
-      if (line.includes('|') && line.trim().startsWith('|')) {
-        start('table')
-
-        const rows: string[][] = []
-
-        while (i < lines.length && lines[i]!.trim().startsWith('|')) {
-          const row = lines[i]!.trim()
-
-          if (!/^[|\s:-]+$/.test(row)) {
-            rows.push(splitRow(row))
-          }
-
-          i++
-        }
-
-        if (rows.length) {
-          nodes.push(renderTable(key, rows, t))
-        }
-
-        break blockIter
-      }
-
-      start('paragraph')
-      nodes.push(<MdInline key={key} t={t} text={line} />)
       i++
-      }
-      // End blockIter: the body either fell through (final paragraph
-      // case above advanced i and pushed) or `break blockIter`'d out
-      // of an explicit branch. Either way `i` is now past this block.
 
-      // Wrap step: every node pushed during this iteration belongs to
-      // the same block (lines [blockStart, i)). Record the range — the
-      // post-loop pass will splice each block's nodes into a
-      // <Box copySource=...> wrapper.
-      const blockEnd = i
-      const range = blockEnd > blockStart ? { end: blockEnd, start: blockStart } : null
-
-      for (let k = beforeCount; k < nodes.length; k++) {
-        nodeRanges[k] = range
-      }
+      continue
     }
 
-    // Post-process: group consecutive nodes with the same block range
-    // and wrap each group in a <Box copySource={raw block source}>.
-    // Nodes with no range (gap pushes) stay flat.
-    const wrapped: ReactNode[] = []
-    let groupStart = 0
+    if (AUDIO_DIRECTIVE_RE.test(line)) {
+      i++
 
-    while (groupStart < nodes.length) {
-      const range = nodeRanges[groupStart] ?? null
+      continue
+    }
 
-      if (!range) {
-        wrapped.push(nodes[groupStart]!)
-        groupStart++
+    const media = line.match(MEDIA_LINE_RE)?.[1]
+
+    if (media) {
+      start('paragraph')
+      push(
+        <Text color={t.color.muted} key={key} wrap="wrap-trim">
+          {'▸ '}
+
+          <Link url={/^(?:\/|[a-z]:[\\/])/i.test(media) ? `file://${media}` : media}>
+            <Text color={t.color.accent} underline>
+              {media}
+            </Text>
+          </Link>
+        </Text>,
+        lines.slice(blockStart, i + 1).join('\n')
+      )
+      i++
+
+      continue
+    }
+
+    const fence = line.match(FENCE_RE)
+
+    if (fence) {
+      const char = fence[1]![0] as '`' | '~'
+      const len = fence[1]!.length
+      const lang = fence[2]!.trim().toLowerCase()
+      const block: string[] = []
+
+      for (i++; i < lines.length; i++) {
+        const close = lines[i]!.match(FENCE_CLOSE_RE)?.[1]
+
+        if (close && close[0] === char && close.length >= len) {
+          break
+        }
+
+        block.push(lines[i]!)
+      }
+
+      const sawCloser = i < lines.length
+
+      if (sawCloser) {
+        i++
+      }
+
+      const blockSource = lines.slice(blockStart, i).join('\n')
+      // innerSource = the body lines only (no opener, no closer). innerOffset
+      // = byte offset within blockSource where the body begins (immediately
+      // after the opener line's trailing newline).
+      const openerLen = lines[blockStart]!.length + 1 // +1 for the \n
+      const innerSource = block.join('\n')
+      const innerOffset = openerLen
+
+      if (['md', 'markdown'].includes(lang)) {
+        start('paragraph')
+        push(
+          <Md compact={compact} key={key} t={t} text={block.join('\n')} />,
+          blockSource,
+          { innerOffset, innerSource }
+        )
 
         continue
       }
 
-      let groupEnd = groupStart + 1
+      start('code')
 
-      while (groupEnd < nodes.length && nodeRanges[groupEnd] === range) {
-        groupEnd++
-      }
+      const isDiff = lang === 'diff'
+      const highlighted = !isDiff && isHighlightable(lang)
 
-      const blockSource = lines.slice(range.start, range.end).join('\n')
-      const groupNodes = nodes.slice(groupStart, groupEnd)
-      // Single-node groups skip the extra Box layer when possible — but
-      // we still need a wrapper to carry copySource. flexDirection=
-      // 'column' matches the parent Box at line ~860 so layout stays
-      // identical to the unwrapped version.
-      wrapped.push(
-        <Box copySource={blockSource} flexDirection="column" key={`md-block-${groupStart}`}>
-          {groupNodes}
-        </Box>
+      push(
+        <Box flexDirection="column" key={key} paddingLeft={2}>
+          {lang && !isDiff && <Text color={t.color.muted}>{'─ ' + lang}</Text>}
+
+          {block.map((l, j) => {
+            if (highlighted) {
+              return (
+                <Text key={j}>
+                  {highlightLine(l, lang, t).map(([color, text], kk) =>
+                    color ? (
+                      <Text color={color} key={kk}>
+                        {text}
+                      </Text>
+                    ) : (
+                      <Text key={kk}>{text}</Text>
+                    )
+                  )}
+                </Text>
+              )
+            }
+
+            const add = isDiff && l.startsWith('+')
+            const del = isDiff && l.startsWith('-')
+            const hunk = isDiff && l.startsWith('@@')
+
+            return (
+              <Text
+                backgroundColor={add ? t.color.diffAdded : del ? t.color.diffRemoved : undefined}
+                color={add ? t.color.diffAddedWord : del ? t.color.diffRemovedWord : hunk ? t.color.muted : undefined}
+                dimColor={isDiff && !add && !del && !hunk && l.startsWith(' ')}
+                key={j}
+              >
+                {l}
+              </Text>
+            )
+          })}
+        </Box>,
+        blockSource,
+        { innerOffset, innerSource }
       )
-      groupStart = groupEnd
+
+      continue
     }
 
-    cacheSet(bucket, cacheKey, wrapped)
+    const mathOpen = line.match(MATH_BLOCK_OPEN_RE)
 
-    return wrapped
-  }, [compact, t, text])
+    if (mathOpen) {
+      const opener = mathOpen[1]!
+      const closeRe = opener === '$$' ? MATH_BLOCK_CLOSE_DOLLAR_RE : MATH_BLOCK_CLOSE_BRACKET_RE
+      const headRest = mathOpen[2] ?? ''
+      const block: string[] = []
 
-  return <Box flexDirection="column">{nodes}</Box>
+      // Single-line block: `$$x + y = z$$` or `\[x\]`. Capture inner content
+      // and emit the block immediately. Without this, the close-scan loop
+      // skips line `i` and treats the next opener as our closer, swallowing
+      // every paragraph in between.
+      const sameLineClose = headRest.match(closeRe)
+
+      if (sameLineClose) {
+        const inner = sameLineClose[1]!.trim()
+
+        start('code')
+        push(
+          <Box flexDirection="column" key={key} paddingLeft={2}>
+            {inner ? <Text color={t.color.accent}>{renderMath(texToUnicode(inner))}</Text> : null}
+          </Box>,
+          lines.slice(blockStart, i + 1).join('\n')
+        )
+        i++
+
+        continue
+      }
+
+      // Multi-line block: scan ahead for a real closer before committing.
+      // If none exists in the rest of the document, render this line as a
+      // paragraph instead of consuming everything that follows.
+      let closeIdx = -1
+
+      for (let j = i + 1; j < lines.length; j++) {
+        if (closeRe.test(lines[j]!)) {
+          closeIdx = j
+
+          break
+        }
+      }
+
+      if (closeIdx < 0) {
+        start('paragraph')
+        push(<MdInline key={key} t={t} text={line} />, line)
+        i++
+
+        continue
+      }
+
+      if (headRest.trim()) {
+        block.push(headRest)
+      }
+
+      for (let j = i + 1; j < closeIdx; j++) {
+        block.push(lines[j]!)
+      }
+
+      const tail = lines[closeIdx]!.match(closeRe)![1]!.trimEnd()
+
+      if (tail.trim()) {
+        block.push(tail)
+      }
+
+      start('code')
+      push(
+        <Box flexDirection="column" key={key} paddingLeft={2}>
+          {block.map((l, j) => (
+            <Text color={t.color.accent} key={j}>
+              {renderMath(texToUnicode(l))}
+            </Text>
+          ))}
+        </Box>,
+        lines.slice(blockStart, closeIdx + 1).join('\n')
+      )
+      i = closeIdx + 1
+
+      continue
+    }
+
+    const heading = line.match(HEADING_RE)?.[2]
+
+    if (heading) {
+      start('heading')
+      push(
+        <Text bold color={t.color.accent} key={key} wrap="wrap-trim">
+          <MdInline t={t} text={heading} />
+        </Text>,
+        line
+      )
+      i++
+
+      continue
+    }
+
+    if (i + 1 < lines.length && SETEXT_RE.test(lines[i + 1]!)) {
+      start('heading')
+      push(
+        <Text bold color={t.color.accent} key={key} wrap="wrap-trim">
+          <MdInline t={t} text={line.trim()} />
+        </Text>,
+        lines.slice(blockStart, i + 2).join('\n')
+      )
+      i += 2
+
+      continue
+    }
+
+    if (HR_RE.test(line)) {
+      start('rule')
+      push(
+        <Text color={t.color.muted} key={key}>
+          {'─'.repeat(36)}
+        </Text>,
+        line
+      )
+      i++
+
+      continue
+    }
+
+    const footnote = line.match(FOOTNOTE_RE)
+
+    if (footnote) {
+      start('list')
+
+      const fnNodes: ReactNode[] = [
+        <Text color={t.color.muted} key={key} wrap="wrap-trim">
+          [{footnote[1]}] <MdInline t={t} text={footnote[2] ?? ''} />
+        </Text>
+      ]
+
+      i++
+
+      while (i < lines.length && /^\s{2,}\S/.test(lines[i]!)) {
+        fnNodes.push(
+          <Box key={`${key}-cont-${i}`} paddingLeft={2}>
+            <Text color={t.color.muted} wrap="wrap-trim">
+              <MdInline t={t} text={lines[i]!.trim()} />
+            </Text>
+          </Box>
+        )
+        i++
+      }
+
+      push(<Fragment>{fnNodes}</Fragment>, lines.slice(blockStart, i).join('\n'))
+
+      continue
+    }
+
+    if (i + 1 < lines.length && DEF_RE.test(lines[i + 1]!)) {
+      start('list')
+
+      const defNodes: ReactNode[] = [
+        <Text bold key={key} wrap="wrap-trim">
+          {line.trim()}
+        </Text>
+      ]
+
+      i++
+
+      while (i < lines.length) {
+        const def = lines[i]!.match(DEF_RE)?.[1]
+
+        if (!def) {
+          break
+        }
+
+        defNodes.push(
+          <Text key={`${key}-def-${i}`} wrap="wrap-trim">
+            <Text color={t.color.muted}> · </Text>
+            <MdInline t={t} text={def} />
+          </Text>
+        )
+        i++
+      }
+
+      push(<Fragment>{defNodes}</Fragment>, lines.slice(blockStart, i).join('\n'))
+
+      continue
+    }
+
+    const bullet = line.match(BULLET_RE)
+
+    if (bullet) {
+      start('list')
+
+      const task = bullet[2]!.match(TASK_RE)
+      const marker = task ? (task[1]!.toLowerCase() === 'x' ? '☑' : '☐') : '•'
+
+      push(
+        <Box key={key} paddingLeft={indentDepth(bullet[1]!) * 2}>
+          <Text wrap="wrap-trim">
+            <Text color={t.color.muted}>{marker} </Text>
+            <MdInline t={t} text={task ? task[2]! : bullet[2]!} />
+          </Text>
+        </Box>,
+        line
+      )
+      i++
+
+      continue
+    }
+
+    const numbered = line.match(NUMBERED_RE)
+
+    if (numbered) {
+      start('list')
+      push(
+        <Box key={key} paddingLeft={indentDepth(numbered[1]!) * 2}>
+          <Text wrap="wrap-trim">
+            <Text color={t.color.muted}>{numbered[2]}. </Text>
+            <MdInline t={t} text={numbered[3]!} />
+          </Text>
+        </Box>,
+        line
+      )
+      i++
+
+      continue
+    }
+
+    if (QUOTE_RE.test(line)) {
+      start('quote')
+
+      const quoteLines: Array<{ depth: number; text: string }> = []
+
+      while (i < lines.length && QUOTE_RE.test(lines[i]!)) {
+        const prefix = lines[i]!.match(QUOTE_RE)?.[0] ?? ''
+
+        quoteLines.push({ depth: (prefix.match(/>/g) ?? []).length, text: lines[i]!.slice(prefix.length) })
+        i++
+      }
+
+      push(
+        <Box flexDirection="column" key={key}>
+          {quoteLines.map((ql, qi) => (
+            <Box key={qi} paddingLeft={Math.max(0, ql.depth - 1) * 2}>
+              <Text color={t.color.muted} wrap="wrap-trim">
+                │ <MdInline t={t} text={ql.text} />
+              </Text>
+            </Box>
+          ))}
+        </Box>,
+        lines.slice(blockStart, i).join('\n')
+      )
+
+      continue
+    }
+
+    if (line.includes('|') && i + 1 < lines.length && isTableDivider(lines[i + 1]!)) {
+      start('table')
+
+      const rows: string[][] = [splitRow(line)]
+      const tableStart = i
+
+      for (i += 2; i < lines.length && lines[i]!.includes('|') && lines[i]!.trim(); i++) {
+        rows.push(splitRow(lines[i]!))
+      }
+
+      push(renderTable(key, rows, t), lines.slice(tableStart, i).join('\n'))
+
+      continue
+    }
+
+    if (/^<\/?details\b/i.test(line)) {
+      i++
+
+      continue
+    }
+
+    const summary = line.match(/^<summary>(.*?)<\/summary>$/i)?.[1]
+
+    if (summary) {
+      start('paragraph')
+      push(
+        <Text color={t.color.muted} key={key} wrap="wrap-trim">
+          ▶ {summary}
+        </Text>,
+        line
+      )
+      i++
+
+      continue
+    }
+
+    if (/^<\/?[^>]+>$/.test(line.trim())) {
+      start('paragraph')
+      push(
+        <Text color={t.color.muted} key={key} wrap="wrap-trim">
+          {line.trim()}
+        </Text>,
+        line
+      )
+      i++
+
+      continue
+    }
+
+    if (line.includes('|') && line.trim().startsWith('|')) {
+      start('table')
+
+      const rows: string[][] = []
+      const tableStart = i
+
+      while (i < lines.length && lines[i]!.trim().startsWith('|')) {
+        const row = lines[i]!.trim()
+
+        if (!/^[|\s:-]+$/.test(row)) {
+          rows.push(splitRow(row))
+        }
+
+        i++
+      }
+
+      if (rows.length) {
+        push(renderTable(key, rows, t), lines.slice(tableStart, i).join('\n'))
+      }
+
+      continue
+    }
+
+    start('paragraph')
+    push(<MdInline key={key} t={t} text={line} />, line)
+    i++
+  }
+
+  cacheSet(bucket, cacheKey, blocks)
+
+  return blocks
 }
 
 export const Md = memo(MdImpl)
 
 type Kind = 'blank' | 'code' | 'heading' | 'list' | 'paragraph' | 'quote' | 'rule' | 'table' | null
 
+/**
+ * One parsed top-level markdown block: rendered React content plus the raw
+ * source range it was produced from. Used as the cache entry type and as
+ * the per-block unit the outer Md wraps in <CopySource>.
+ *
+ * `innerSource` / `innerOffset` are set on fence blocks so that selecting
+ * code inside a fence yields just the code body (without the ``` markers).
+ * Empty for everything else (where outer == inner).
+ */
+interface MdBlock {
+  content: ReactNode
+  source: string
+  innerSource?: string
+  innerOffset?: number
+}
+
 interface MdProps {
+  /** Message id this Md instance belongs to. When set, each block emits a
+   * <CopySource> registering with the host's copySource registry under
+   * `(msgId, blockIndex)` so the selection→clipboard pipeline can slice
+   * each block's source on demand. When unset (recursive call), blocks
+   * render flat and copy is handled by the OUTER Md's CopySource. */
+  msgId?: string
+  /** Starting blockIndex for this Md's blocks. Streaming UI uses two Md
+   * trees (stable prefix + unstable suffix) under the same msgId; the
+   * suffix passes a large base (e.g. 1000) so its blocks order AFTER the
+   * prefix's in document order. Defaults to 1 (0 is reserved for
+   * non-markdown whole-msg ranges from MessageLine). */
+  blockIndexBase?: number
   compact?: boolean
   t: Theme
   text: string

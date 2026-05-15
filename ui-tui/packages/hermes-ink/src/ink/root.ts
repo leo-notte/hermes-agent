@@ -86,6 +86,16 @@ export const forceRedraw = (stdout: NodeJS.WriteStream = process.stdout): boolea
 }
 
 /**
+ * Look up the live Ink instance for a given output stream. Returns null if
+ * no Ink is mounted for that stdout. Used by host code (TUI) to install
+ * copy-text overrides + read selection state for the transcript-virtual
+ * copy-source pipeline.
+ */
+export const getInkForStdout = (stdout: NodeJS.WriteStream = process.stdout): Ink | null => {
+  return instances.get(stdout) ?? null
+}
+
+/**
  * Mount a component and render the output.
  */
 export const renderSync = (node: ReactNode, options?: NodeJS.WriteStream | RenderOptions): Instance => {

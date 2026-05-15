@@ -83,40 +83,6 @@ export class HyperlinkPool {
   }
 }
 
-// Copy-source pool shared across all screens.
-// Holds the raw source text (markdown, etc.) to substitute when the user
-// copies a region of cells. Index 0 = no copy-source override (fall back
-// to the rendered cell text). Each cell on the screen carries an index
-// into this pool via screen.copySources; identical regions share an ID
-// (e.g. one assistant message with N rows shares one ID across all rows).
-//
-// The pool grows monotonically per session — same lifecycle as charPool
-// and hyperlinkPool, reset together by migrateScreenPools between turns.
-export class CopySourcePool {
-  private strings: string[] = [''] // Index 0 = no copy-source
-  private stringMap = new Map<string, number>()
-
-  intern(source: string | undefined): number {
-    if (!source) {
-      return 0
-    }
-
-    let id = this.stringMap.get(source)
-
-    if (id === undefined) {
-      id = this.strings.length
-      this.strings.push(source)
-      this.stringMap.set(source, id)
-    }
-
-    return id
-  }
-
-  get(id: number): string | undefined {
-    return id === 0 ? undefined : this.strings[id]
-  }
-}
-
 // SGR 7 (inverse) as an AnsiCode. endCode '\x1b[27m' flags VISIBLE_ON_SPACE
 // so bit 0 of the resulting styleId is set → renderer won't skip inverted
 // spaces as invisible.
@@ -451,7 +417,6 @@ export type Screen = Size & {
   // Shared pools — IDs are valid across all screens using the same pools
   charPool: CharPool
   hyperlinkPool: HyperlinkPool
-  copySourcePool: CopySourcePool
 
   // Empty style ID for comparisons
   emptyStyleId: number
@@ -470,23 +435,6 @@ export type Screen = Size & {
    * copies it alongside cells so the blit optimization preserves marks.
    */
   noSelect: Uint8Array
-
-  /**
-   * Per-cell copy-source ID — 1 Int32 per cell, indexes into
-   * `copySourcePool`. 0 = no override (copy uses rendered cell text).
-   * Non-zero IDs all sharing the same value across a contiguous region
-   * mean "if the user copies that region, replace the rendered text
-   * with `copySourcePool.get(id)`". Cells outside any region (id=0) and
-   * partial selections within a region still copy as rendered text —
-   * substitution happens only when the selection is entirely contained
-   * in (or covers all of) one region. See `getSelectedText` in
-   * selection.ts for the per-region collapse logic.
-   *
-   * Lifecycle mirrors `noSelect`: zero-filled by resetScreen each frame,
-   * copied by blitRegion alongside cells so blit fast-paths preserve
-   * the source mapping without re-emission.
-   */
-  copySources: Int32Array
 
   /**
    * Per-cell written bitmap. A written plain space and never-written padding
@@ -565,8 +513,7 @@ export function createScreen(
   height: number,
   styles: StylePool,
   charPool: CharPool,
-  hyperlinkPool: HyperlinkPool,
-  copySourcePool: CopySourcePool = new CopySourcePool()
+  hyperlinkPool: HyperlinkPool
 ): Screen {
   // Warn if dimensions are not valid integers (likely bad yoga layout output)
   warn.ifNotInteger(width, 'createScreen width')
@@ -598,11 +545,9 @@ export function createScreen(
     cells64,
     charPool,
     hyperlinkPool,
-    copySourcePool,
     emptyStyleId: styles.none,
     damage: undefined,
     noSelect: new Uint8Array(size),
-    copySources: new Int32Array(size),
     written: new Uint8Array(size),
     softWrap: new Int32Array(height)
   }
@@ -637,7 +582,6 @@ export function resetScreen(screen: Screen, width: number, height: number): void
     screen.cells = new Int32Array(buf)
     screen.cells64 = new BigInt64Array(buf)
     screen.noSelect = new Uint8Array(size)
-    screen.copySources = new Int32Array(size)
     screen.written = new Uint8Array(size)
   }
 
@@ -648,7 +592,6 @@ export function resetScreen(screen: Screen, width: number, height: number): void
   // Reset all cells — single fill call, no loop
   screen.cells64.fill(EMPTY_CELL_VALUE, 0, size)
   screen.noSelect.fill(0, 0, size)
-  screen.copySources.fill(0, 0, size)
   screen.written.fill(0, 0, size)
   screen.softWrap.fill(0, 0, height)
 
@@ -670,23 +613,16 @@ export function resetScreen(screen: Screen, width: number, height: number): void
  *
  * O(width * height) but only called occasionally (e.g., between conversation turns).
  */
-export function migrateScreenPools(
-  screen: Screen,
-  charPool: CharPool,
-  hyperlinkPool: HyperlinkPool,
-  copySourcePool: CopySourcePool = screen.copySourcePool
-): void {
+export function migrateScreenPools(screen: Screen, charPool: CharPool, hyperlinkPool: HyperlinkPool): void {
   const oldCharPool = screen.charPool
   const oldHyperlinkPool = screen.hyperlinkPool
-  const oldCopySourcePool = screen.copySourcePool
 
-  if (oldCharPool === charPool && oldHyperlinkPool === hyperlinkPool && oldCopySourcePool === copySourcePool) {
+  if (oldCharPool === charPool && oldHyperlinkPool === hyperlinkPool) {
     return
   }
 
   const size = screen.width * screen.height
   const cells = screen.cells
-  const copySources = screen.copySources
 
   // Re-intern chars and hyperlinks in a single pass, stride by 2
   for (let ci = 0; ci < size << 1; ci += 2) {
@@ -708,20 +644,8 @@ export function migrateScreenPools(
     }
   }
 
-  // Re-intern copy sources (separate Int32 array, one per cell)
-  if (oldCopySourcePool !== copySourcePool) {
-    for (let i = 0; i < size; i++) {
-      const oldId = copySources[i]!
-
-      if (oldId !== 0) {
-        copySources[i] = copySourcePool.intern(oldCopySourcePool.get(oldId))
-      }
-    }
-  }
-
   screen.charPool = charPool
   screen.hyperlinkPool = hyperlinkPool
-  screen.copySourcePool = copySourcePool
 }
 
 /**
@@ -1028,8 +952,6 @@ export function blitRegion(
   const dstCells = dst.cells
   const srcNoSel = src.noSelect
   const dstNoSel = dst.noSelect
-  const srcCopy = src.copySources
-  const dstCopy = dst.copySources
   const srcWritten = src.written
   const dstWritten = dst.written
 
@@ -1050,8 +972,6 @@ export function blitRegion(
     const nsStart = regionY * src.width
     const nsLen = (maxY - regionY) * src.width
     dstNoSel.set(srcNoSel.subarray(nsStart, nsStart + nsLen), nsStart)
-    // copySources is 4 bytes/cell — same per-cell granularity as noSelect
-    dstCopy.set(srcCopy.subarray(nsStart, nsStart + nsLen), nsStart)
     dstWritten.set(srcWritten.subarray(nsStart, nsStart + nsLen), nsStart)
   } else {
     // Per-row copy for partial-width or mismatched-stride regions
@@ -1063,7 +983,6 @@ export function blitRegion(
     for (let y = regionY; y < maxY; y++) {
       dstCells.set(srcCells.subarray(srcRowCI, srcRowCI + rowBytes), dstRowCI)
       dstNoSel.set(srcNoSel.subarray(srcRowNS, srcRowNS + rowLen), dstRowNS)
-      dstCopy.set(srcCopy.subarray(srcRowNS, srcRowNS + rowLen), dstRowNS)
       dstWritten.set(srcWritten.subarray(srcRowNS, srcRowNS + rowLen), dstRowNS)
       srcRowCI += srcStride
       dstRowCI += dstStride
@@ -1234,7 +1153,6 @@ export function shiftRows(screen: Screen, top: number, bottom: number, n: number
   const w = screen.width
   const cells64 = screen.cells64
   const noSel = screen.noSelect
-  const copySources = screen.copySources
   const written = screen.written
   const sw = screen.softWrap
   const absN = Math.abs(n)
@@ -1242,7 +1160,6 @@ export function shiftRows(screen: Screen, top: number, bottom: number, n: number
   if (absN > bottom - top) {
     cells64.fill(EMPTY_CELL_VALUE, top * w, (bottom + 1) * w)
     noSel.fill(0, top * w, (bottom + 1) * w)
-    copySources.fill(0, top * w, (bottom + 1) * w)
     written.fill(0, top * w, (bottom + 1) * w)
     sw.fill(0, top, bottom + 1)
 
@@ -1253,24 +1170,20 @@ export function shiftRows(screen: Screen, top: number, bottom: number, n: number
     // SU: row top+n..bottom → top..bottom-n; clear bottom-n+1..bottom
     cells64.copyWithin(top * w, (top + n) * w, (bottom + 1) * w)
     noSel.copyWithin(top * w, (top + n) * w, (bottom + 1) * w)
-    copySources.copyWithin(top * w, (top + n) * w, (bottom + 1) * w)
     written.copyWithin(top * w, (top + n) * w, (bottom + 1) * w)
     sw.copyWithin(top, top + n, bottom + 1)
     cells64.fill(EMPTY_CELL_VALUE, (bottom - n + 1) * w, (bottom + 1) * w)
     noSel.fill(0, (bottom - n + 1) * w, (bottom + 1) * w)
-    copySources.fill(0, (bottom - n + 1) * w, (bottom + 1) * w)
     written.fill(0, (bottom - n + 1) * w, (bottom + 1) * w)
     sw.fill(0, bottom - n + 1, bottom + 1)
   } else {
     // SD: row top..bottom+n → top-n..bottom; clear top..top-n-1
     cells64.copyWithin((top - n) * w, top * w, (bottom + n + 1) * w)
     noSel.copyWithin((top - n) * w, top * w, (bottom + n + 1) * w)
-    copySources.copyWithin((top - n) * w, top * w, (bottom + n + 1) * w)
     written.copyWithin((top - n) * w, top * w, (bottom + n + 1) * w)
     sw.copyWithin(top - n, top, bottom + n + 1)
     cells64.fill(EMPTY_CELL_VALUE, top * w, (top - n) * w)
     noSel.fill(0, top * w, (top - n) * w)
-    copySources.fill(0, top * w, (top - n) * w)
     written.fill(0, top * w, (top - n) * w)
     sw.fill(0, top, top - n)
   }
@@ -1673,33 +1586,5 @@ export function markNoSelectRegion(screen: Screen, x: number, y: number, width: 
   for (let row = Math.max(0, y); row < maxY; row++) {
     const rowStart = row * stride
     noSel.fill(1, rowStart + Math.max(0, x), rowStart + maxX)
-  }
-}
-
-/**
- * Mark a rectangular region with a copy-source ID so the cells in that
- * region copy as `copySourcePool.get(id)` rather than as their rendered
- * char content. Clamps to screen bounds. Called from output.ts when a
- * <Box copySource="..."> renders. No damage tracking — copySources
- * doesn't affect terminal output, only getSelectedText reads it.
- *
- * Sister to markNoSelectRegion — same shape, different bitmap.
- */
-export function markCopySourceRegion(
-  screen: Screen,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  id: number
-): void {
-  const maxX = Math.min(x + width, screen.width)
-  const maxY = Math.min(y + height, screen.height)
-  const cs = screen.copySources
-  const stride = screen.width
-
-  for (let row = Math.max(0, y); row < maxY; row++) {
-    const rowStart = row * stride
-    cs.fill(id, rowStart + Math.max(0, x), rowStart + maxX)
   }
 }

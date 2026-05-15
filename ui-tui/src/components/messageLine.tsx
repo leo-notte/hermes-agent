@@ -1,10 +1,12 @@
 import { Ansi, Box, NoSelect, Text } from '@hermes/ink'
-import { memo, useState } from 'react'
+import { memo, type ReactNode, useState } from 'react'
 
 import { LONG_MSG } from '../config/limits.js'
 import { sectionMode } from '../domain/details.js'
 import { userDisplay } from '../domain/messages.js'
 import { ROLE } from '../domain/roles.js'
+import { CopySource } from '../lib/copySource/CopySource.js'
+import { buildLineStartsFromRows, simpleOffsetFor } from '../lib/copySource/offsetMaps.js'
 import { transcriptBodyWidth, transcriptGutterWidth } from '../lib/inputMetrics.js'
 import {
   boundedHistoryRenderText,
@@ -33,6 +35,7 @@ export const MessageLine = memo(function MessageLine({
   isStreaming = false,
   limitHistoryRender = false,
   msg,
+  msgId,
   sections,
   t,
   tools = []
@@ -87,17 +90,19 @@ export const MessageLine = memo(function MessageLine({
     const stripped = hasAnsi(msg.text) ? stripAnsi(msg.text) : msg.text
     const preview = compactPreview(stripped, maxChars) || '(empty tool result)'
 
+    const previewNode = hasAnsi(msg.text) ? (
+      <Text wrap="truncate-end">
+        <Ansi>{msg.text}</Ansi>
+      </Text>
+    ) : (
+      <Text color={t.color.muted} wrap="truncate-end">
+        {preview}
+      </Text>
+    )
+
     return (
       <Box alignSelf="flex-start" borderColor={t.color.muted} borderStyle="round" marginLeft={3} paddingX={1}>
-        {hasAnsi(msg.text) ? (
-          <Text wrap="truncate-end">
-            <Ansi>{msg.text}</Ansi>
-          </Text>
-        ) : (
-          <Text color={t.color.muted} wrap="truncate-end">
-            {preview}
-          </Text>
-        )}
+        {wrapCopySource(msgId, msg.text, previewNode)}
       </Box>
     )
   }
@@ -110,7 +115,7 @@ export const MessageLine = memo(function MessageLine({
 
   const content = (() => {
     if (msg.kind === 'slash') {
-      return <Text color={t.color.muted}>{msg.text}</Text>
+      return wrapCopySource(msgId, msg.text, <Text color={t.color.muted}>{msg.text}</Text>)
     }
 
     // ── Collapsible long system message (system prompt, AGENTS.md, etc.) ──
@@ -129,13 +134,13 @@ export const MessageLine = memo(function MessageLine({
               {msg.text.length.toLocaleString()} chars
             </Text>
           </Box>
-          {systemOpen && <Ansi>{msg.text}</Ansi>}
+          {systemOpen && wrapCopySource(msgId, msg.text, <Ansi>{msg.text}</Ansi>)}
         </Box>
       )
     }
 
     if (msg.role !== 'user' && hasAnsi(msg.text)) {
-      return <Ansi>{msg.text}</Ansi>
+      return wrapCopySource(msgId, msg.text, <Ansi>{msg.text}</Ansi>)
     }
 
     if (msg.role === 'assistant') {
@@ -143,16 +148,23 @@ export const MessageLine = memo(function MessageLine({
         // Incremental markdown: split at the last stable block boundary so
         // only the in-flight tail re-tokenizes per delta. See
         // streamingMarkdown.tsx for the cost model.
-        <StreamingMd compact={compact} t={t} text={boundedLiveRenderText(msg.text)} />
+        <StreamingMd compact={compact} msgId={msgId} t={t} text={boundedLiveRenderText(msg.text)} />
       ) : (
-        <Md compact={compact} t={t} text={limitHistoryRender ? boundedHistoryRenderText(msg.text) : msg.text} />
+        <Md
+          compact={compact}
+          msgId={msgId}
+          t={t}
+          text={limitHistoryRender ? boundedHistoryRenderText(msg.text) : msg.text}
+        />
       )
     }
 
     if (msg.role === 'user' && msg.text.length > LONG_MSG && isPasteBackedText(msg.text)) {
       const [head, ...rest] = userDisplay(msg.text).split('[long message]')
 
-      return (
+      return wrapCopySource(
+        msgId,
+        msg.text,
         <Text color={body}>
           {head}
           <Text color={t.color.muted} dimColor>
@@ -163,7 +175,7 @@ export const MessageLine = memo(function MessageLine({
       )
     }
 
-    return <Text {...(body ? { color: body } : {})}>{msg.text}</Text>
+    return wrapCopySource(msgId, msg.text, <Text {...(body ? { color: body } : {})}>{msg.text}</Text>)
   })()
 
   // Diff segments (emitted by pushInlineDiffSegment between narration
@@ -199,9 +211,7 @@ export const MessageLine = memo(function MessageLine({
           </Text>
         </NoSelect>
 
-        <Box copySource={msg.text} width={transcriptBodyWidth(cols, msg.role, t.brand.prompt)}>
-          {content}
-        </Box>
+        <Box width={transcriptBodyWidth(cols, msg.role, t.brand.prompt)}>{content}</Box>
       </Box>
     </Box>
   )
@@ -215,7 +225,50 @@ interface MessageLineProps {
   isStreaming?: boolean
   limitHistoryRender?: boolean
   msg: Msg
+  /** Stable id used to anchor copy-source ranges in the registry. When
+   * unset, the message isn't covered by the copy-source pipeline — its
+   * text won't survive partial-selection round-trip. Set this for any
+   * message in the transcript that the user might copy. Trail / intro /
+   * panel messages don't need it (no copyable body text). */
+  msgId?: string
   sections?: SectionVisibility
   t: Theme
   tools?: ActiveTool[]
+}
+
+/**
+ * Wrap a rendered node in a whole-message CopySource so partial selection
+ * of plain (non-markdown) message content round-trips the raw source text.
+ *
+ * blockIndex=0 is reserved for whole-msg ranges (markdown blocks use ≥1
+ * via Md's `blockIndexBase`). visualLineCount = source line count; the
+ * simple offset map maps each visual row (relative to the wrapping box)
+ * to the byte offset of the corresponding source line. Soft-wrap
+ * continuations at the Ink layer fall past `visualLineCount`, which
+ * clamps to `outerSource.length` — copying a selection that ends inside
+ * a soft-wrapped continuation snaps to the end of that source line.
+ *
+ * When `msgId` is undefined (trail / intro / panel etc.), returns the
+ * raw node — those msgs aren't covered by the copy pipeline and don't
+ * need to be.
+ */
+function wrapCopySource(msgId: string | undefined, source: string, node: ReactNode): ReactNode {
+  if (!msgId) {
+    return node
+  }
+
+  const lineRows = source.split('\n')
+  const rowStarts = buildLineStartsFromRows(lineRows)
+
+  return (
+    <CopySource
+      blockIndex={0}
+      getOffset={simpleOffsetFor(source, rowStarts)}
+      msgId={msgId}
+      outerSource={source}
+      visualLineCount={Math.max(1, lineRows.length)}
+    >
+      {node}
+    </CopySource>
+  )
 }

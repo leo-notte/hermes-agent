@@ -398,25 +398,16 @@ export type Styles = {
   readonly noSelect?: boolean | 'from-left-edge'
 
   /**
-   * Mark this box's region of cells as carrying a hidden "source"
-   * string. When the user copies cells inside the region, the rendered
-   * text is replaced with this string in the clipboard.
+   * Source-range id from the copySource registry.
    *
-   * Used to round-trip raw markdown / formatting that the renderer
-   * strips before writing to the screen — wrap a `<Md>` block in a Box
-   * with `copySource={rawMarkdownLine}` and copy gives back the raw
-   * `**bold**` / `# heading` / fence syntax instead of the rendered
-   * cells. Only affects alt-screen text selection; no-op otherwise.
-   *
-   * Substitution rules: a selection that fully covers the region (or
-   * is fully contained inside it) copies the source string. A
-   * selection that crosses multiple regions concatenates each
-   * region's source. A partial selection within a single region
-   * falls back to rendered cell text — picking a known-good substring
-   * out of arbitrary markdown source is harder than the v1 mapping
-   * supports (no per-row span yet).
+   * When set on an ink-box, the rendered DOMElement carries this rangeId
+   * on its `attributes` and the copy-source hitTest can map (col, row)
+   * mouse positions back to a transcript-virtual SelectionPoint. The Box
+   * itself has no visual effect from this prop — it's purely a data
+   * carrier for the selection/copy pipeline (mirrors how `noSelect` only
+   * affects selection extraction, not visual rendering).
    */
-  readonly copySource?: string
+  readonly copyRangeId?: number
 }
 
 const applyPositionStyles = (node: LayoutNode, style: Styles): void => {
