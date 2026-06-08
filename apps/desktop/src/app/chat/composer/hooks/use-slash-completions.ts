@@ -180,7 +180,11 @@ export function useSlashCompletions(options: {
             // Arg suggestions (e.g. `/handoff <platform>`) live under one
             // header; otherwise split skills out from built-in commands.
             group: isArgCompletion ? 'Options' : isDesktopSlashExtensionCommand(item.text) ? 'Skills' : 'Commands',
-            meta: desktopSlashDescription(item.text, textValue(item.meta))
+            // Arg items carry their own meta (the personality/toolset/platform
+            // blurb). Only command rows get the registry description — looking
+            // one up for `/personality none` would clobber it with the parent
+            // command's text.
+            meta: isArgCompletion ? textValue(item.meta) : desktopSlashDescription(item.text, textValue(item.meta))
           }))
 
         // Keep each group contiguous so headers render once: Commands before
