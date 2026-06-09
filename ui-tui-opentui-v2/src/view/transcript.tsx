@@ -23,7 +23,7 @@ export function Transcript(props: { store: SessionStore }) {
       <scrollbox style={{ flexGrow: 1, minHeight: 0 }} stickyScroll stickyStart="bottom">
         {/* empty-transcript home screen (item 12); replaced by messages on the first turn */}
         <Show when={props.store.state.messages.length === 0}>
-          <HomeHint />
+          <HomeHint catalog={props.store.state.catalog} />
         </Show>
         <For each={props.store.state.messages}>{message => <MessageLine message={message} />}</For>
       </scrollbox>

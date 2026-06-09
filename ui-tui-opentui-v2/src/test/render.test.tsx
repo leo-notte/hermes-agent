@@ -253,6 +253,29 @@ describe('App render (Phase 1, themed)', () => {
     expect(frame).toContain('to mention') // the input tips line
   })
 
+  test('the home screen shows a collapsible tools/skills/MCP catalog panel (item 9)', async () => {
+    const store = createSessionStore()
+    store.apply({ type: 'gateway.ready' })
+    store.setCatalog({
+      tools: { total: 42, toolsets: [{ name: 'core', count: 12 }] },
+      skills: { total: 7, categories: [{ name: 'dev', count: 7 }] },
+      mcp: { servers: ['railway', 'beeper'] }
+    })
+
+    const frame = await captureFrame(
+      () => (
+        <ThemeProvider theme={() => store.state.theme}>
+          <App store={store} />
+        </ThemeProvider>
+      ),
+      { until: '42 tools', width: 72, height: 20 }
+    )
+
+    expect(frame).toContain('42 tools')
+    expect(frame).toContain('7 skills')
+    expect(frame).toContain('2 MCP') // mcp.servers.length
+  })
+
   test('the status bar renders model · context% · cwd (item 14)', async () => {
     const store = createSessionStore()
     store.apply({ type: 'gateway.ready' })

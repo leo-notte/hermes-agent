@@ -8518,6 +8518,54 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5031, str(e))
 
 
+@method("startup.catalog")
+def _(rid, params: dict) -> dict:
+    # Aggregate tools / skills / MCP servers for the native engine's startup panel
+    # (item 9). Opt-in RPC — only the opentui home screen calls it, so the Ink path
+    # is untouched. Each section is best-effort: a failing source yields an empty
+    # section rather than erroring the whole call.
+    tools: dict = {"total": 0, "toolsets": []}
+    try:
+        from toolsets import get_all_toolsets, get_toolset_info
+
+        for name in sorted(get_all_toolsets().keys()):
+            info = get_toolset_info(name)
+            if not info:
+                continue
+            tools["toolsets"].append({"name": name, "count": int(info["tool_count"])})
+            tools["total"] += int(info["tool_count"])
+    except Exception:
+        pass
+
+    skills: dict = {"total": 0, "categories": []}
+    try:
+        from hermes_cli.banner import get_available_skills
+
+        by_cat = get_available_skills() or {}
+        for cat in sorted(by_cat.keys()):
+            names = by_cat[cat] or []
+            skills["categories"].append({"name": cat, "count": len(names)})
+            skills["total"] += len(names)
+    except Exception:
+        pass
+
+    mcp_servers: list = []
+    try:
+        from hermes_cli.config import read_raw_config
+        from hermes_cli.tools_config import _parse_enabled_flag
+
+        raw_cfg = read_raw_config() or {}
+        servers = raw_cfg.get("mcp_servers")
+        if isinstance(servers, dict):
+            for name, cfg in servers.items():
+                if isinstance(cfg, dict) and _parse_enabled_flag(cfg.get("enabled", True), default=True):
+                    mcp_servers.append(str(name))
+    except Exception:
+        pass
+
+    return _ok(rid, {"tools": tools, "skills": skills, "mcp": {"servers": sorted(mcp_servers)}})
+
+
 @method("tools.show")
 def _(rid, params: dict) -> dict:
     try:

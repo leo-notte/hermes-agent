@@ -134,6 +134,21 @@ describe('session store — ordered parts (Phase 2b)', () => {
     expect(tool.lineCount).toBe(2)
   })
 
+  test('setCatalog maps the loose startup.catalog response defensively (item 9)', () => {
+    const store = createSessionStore()
+    store.setCatalog({
+      tools: { total: 42, toolsets: [{ name: 'core', count: 12 }, { name: '', count: 1 }] },
+      skills: { total: 7, categories: [{ name: 'dev', count: 7 }] },
+      mcp: { servers: ['railway', 123, 'beeper'] },
+      junk: 'ignored'
+    })
+    const c = store.state.catalog!
+    expect(c.tools.total).toBe(42)
+    expect(c.tools.toolsets).toEqual([{ name: 'core', count: 12 }]) // nameless entry dropped
+    expect(c.skills.total).toBe(7)
+    expect(c.mcp.servers).toEqual(['railway', 'beeper']) // non-string dropped
+  })
+
   test('reasoning.delta accumulates into a reasoning part', () => {
     const store = createSessionStore()
     store.apply({ type: 'message.start' })

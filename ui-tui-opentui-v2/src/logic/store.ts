@@ -140,6 +140,13 @@ export interface SessionInfo {
   compressions?: number
 }
 
+/** Startup catalog (tools/skills/MCP) for the home-screen panel (item 9). */
+export interface Catalog {
+  readonly tools: { readonly total: number; readonly toolsets: ReadonlyArray<{ name: string; count: number }> }
+  readonly skills: { readonly total: number; readonly categories: ReadonlyArray<{ name: string; count: number }> }
+  readonly mcp: { readonly servers: ReadonlyArray<string> }
+}
+
 export interface StoreState {
   ready: boolean
   messages: Message[]
@@ -169,6 +176,8 @@ export interface StoreState {
   /** Transient hint shown above the composer (e.g. "Ctrl+C again to quit" — item 11);
    *  takes visual priority over the busy `status` face. Undefined when none. */
   hint: string | undefined
+  /** Startup tools/skills/MCP catalog (from `startup.catalog`) for the home panel (item 9). */
+  catalog: Catalog | undefined
 }
 
 const LRU_LIMIT = 1000
@@ -254,7 +263,8 @@ export function createSessionStore() {
     dashboard: false,
     status: undefined,
     info: {},
-    hint: undefined
+    hint: undefined,
+    catalog: undefined
   })
 
   // Monotonic part id (stable `key` per part so a new tool part below a streaming
@@ -651,11 +661,34 @@ export function createSessionStore() {
     commitSnapshot(loadSnapshot())
   }
 
+  /** Map the loose `startup.catalog` response into the typed Catalog (item 9). */
+  function setCatalog(raw: unknown): void {
+    if (!raw || typeof raw !== 'object') return
+    const root = raw as { readonly [k: string]: unknown }
+    const obj = (v: unknown): { readonly [k: string]: unknown } =>
+      v && typeof v === 'object' ? (v as { readonly [k: string]: unknown }) : {}
+    const num = (v: unknown): number => (typeof v === 'number' ? v : 0)
+    const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : [])
+    const pair = (v: unknown) => {
+      const o = obj(v)
+      return { count: num(o.count), name: readStr(o, 'name') ?? '' }
+    }
+    const tools = obj(root.tools)
+    const skills = obj(root.skills)
+    const mcp = obj(root.mcp)
+    setState('catalog', {
+      mcp: { servers: list(mcp.servers).filter((s): s is string => typeof s === 'string') },
+      skills: { categories: list(skills.categories).map(pair).filter(p => p.name), total: num(skills.total) },
+      tools: { toolsets: list(tools.toolsets).map(pair).filter(p => p.name), total: num(tools.total) }
+    })
+  }
+
   return {
     state,
     apply,
     pushUser,
     pushSystem,
+    setCatalog,
     clearTranscript,
     setConfirm,
     openPager,

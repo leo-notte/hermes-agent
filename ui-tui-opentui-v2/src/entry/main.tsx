@@ -130,6 +130,13 @@ const bootstrapSession = (gateway: GatewayServiceShape, store: SessionStore, inp
       log.info('bootstrap', 'session created', { sid })
     }
 
+    // Tools/skills/MCP catalog for the home-screen panel (item 9) — best-effort,
+    // never blocks startup if the RPC is missing/old.
+    const catalog = yield* gateway
+      .request<unknown>('startup.catalog', { session_id: sid })
+      .pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+    if (catalog) store.setCatalog(catalog)
+
     const prompt = input.initialPrompt?.trim()
     if (prompt) {
       store.pushUser(prompt)
