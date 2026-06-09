@@ -33,17 +33,25 @@ function relativeTime(targetMs: number, nowMs: number): string {
   const abs = Math.abs(diff)
   const sign = diff < 0 ? -1 : 1
 
-  if (abs < 60_000) {return relativeFmt.format(sign * Math.round(abs / 1000), 'second')}
+  if (abs < 60_000) {
+    return relativeFmt.format(sign * Math.round(abs / 1000), 'second')
+  }
 
-  if (abs < 3_600_000) {return relativeFmt.format(sign * Math.round(abs / 60_000), 'minute')}
+  if (abs < 3_600_000) {
+    return relativeFmt.format(sign * Math.round(abs / 60_000), 'minute')
+  }
 
-  if (abs < 86_400_000) {return relativeFmt.format(sign * Math.round(abs / 3_600_000), 'hour')}
+  if (abs < 86_400_000) {
+    return relativeFmt.format(sign * Math.round(abs / 3_600_000), 'hour')
+  }
 
   return relativeFmt.format(sign * Math.round(abs / 86_400_000), 'day')
 }
 
 function nextRunMs(job: CronJob): null | number {
-  if (!job.next_run_at) {return null}
+  if (!job.next_run_at) {
+    return null
+  }
 
   const ms = Date.parse(job.next_run_at)
 
@@ -54,7 +62,9 @@ function nextRunMs(job: CronJob): null | number {
 // the timestamp is what tells them apart. Compact (no year, no seconds) for the
 // narrow sidebar.
 function formatRunTime(seconds?: null | number): string {
-  if (!seconds) {return '—'}
+  if (!seconds) {
+    return '—'
+  }
 
   const date = new Date(seconds * 1000)
 
@@ -75,6 +85,7 @@ interface SidebarCronJobsSectionProps {
   onTriggerJob: (jobId: string) => void
   onToggle: () => void
   open: boolean
+  sharedScroller?: boolean
 }
 
 export function SidebarCronJobsSection({
@@ -85,7 +96,8 @@ export function SidebarCronJobsSection({
   onOpenRun,
   onTriggerJob,
   onToggle,
-  open
+  open,
+  sharedScroller = false
 }: SidebarCronJobsSectionProps) {
   const [nowMs, setNowMs] = useState(() => Date.now())
   // Single-open inline peek so the section stays scannable.
@@ -94,7 +106,9 @@ export function SidebarCronJobsSection({
   // One clock for the whole section (rows are pure) so the countdowns tick
   // without re-rendering the rest of the sidebar. Only runs while expanded.
   useEffect(() => {
-    if (!open) {return}
+    if (!open) {
+      return
+    }
 
     const id = window.setInterval(() => setNowMs(Date.now()), 1000)
 
@@ -108,11 +122,17 @@ export function SidebarCronJobsSection({
       const an = nextRunMs(a)
       const bn = nextRunMs(b)
 
-      if (an !== null && bn !== null && an !== bn) {return an - bn}
+      if (an !== null && bn !== null && an !== bn) {
+        return an - bn
+      }
 
-      if (an === null && bn !== null) {return 1}
+      if (an === null && bn !== null) {
+        return 1
+      }
 
-      if (an !== null && bn === null) {return -1}
+      if (an !== null && bn === null) {
+        return -1
+      }
 
       return jobTitle(a).localeCompare(jobTitle(b))
     })
@@ -139,7 +159,12 @@ export function SidebarCronJobsSection({
         </button>
       </div>
       {open && (
-        <SidebarGroupContent className="flex max-h-72 shrink-0 flex-col gap-px overflow-y-auto overscroll-contain pb-1.75">
+        <SidebarGroupContent
+          className={cn(
+            'flex shrink-0 flex-col gap-px pb-1.75',
+            !sharedScroller && 'max-h-72 overflow-y-auto overscroll-contain'
+          )}
+        >
           {shown.map(job => (
             <CronJobSidebarRow
               expanded={peekJobId === job.id}
@@ -181,11 +206,7 @@ function CronJobSidebarRow({
   const next = nextRunMs(job)
   const label = jobTitle(job)
 
-  const meta = INACTIVE_STATES.has(state)
-    ? (c.states[state] ?? state)
-    : next !== null
-      ? relativeTime(next, nowMs)
-      : '—'
+  const meta = INACTIVE_STATES.has(state) ? (c.states[state] ?? state) : next !== null ? relativeTime(next, nowMs) : '—'
 
   return (
     <div>
@@ -257,13 +278,7 @@ function CronJobSidebarRow({
   )
 }
 
-function CronJobSidebarRuns({
-  jobId,
-  onOpenRun
-}: {
-  jobId: string
-  onOpenRun: (sessionId: string) => void
-}) {
+function CronJobSidebarRuns({ jobId, onOpenRun }: { jobId: string; onOpenRun: (sessionId: string) => void }) {
   const { t } = useI18n()
   const c = t.cron
   const selectedSessionId = useStore($selectedStoredSessionId)
@@ -275,16 +290,22 @@ function CronJobSidebarRuns({
     const load = () =>
       getCronJobRuns(jobId, PEEK_RUN_LIMIT)
         .then(result => {
-          if (!cancelled) {setRuns(result)}
+          if (!cancelled) {
+            setRuns(result)
+          }
         })
         .catch(() => {
-          if (!cancelled) {setRuns(prev => prev ?? [])}
+          if (!cancelled) {
+            setRuns(prev => prev ?? [])
+          }
         })
 
     void load()
 
     const intervalId = window.setInterval(() => {
-      if (document.visibilityState === 'visible') {void load()}
+      if (document.visibilityState === 'visible') {
+        void load()
+      }
     }, PEEK_POLL_INTERVAL_MS)
 
     return () => {
