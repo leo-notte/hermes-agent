@@ -2,7 +2,7 @@
 
 Covers:
 
-- All three bundled plugins (browserbase, browser-use, firecrawl)
+- All bundled plugins (browserbase, browser-use, firecrawl, notte)
   instantiate and self-report the expected ABC defaults.
 - Each plugin's ``is_available()`` correctly reflects env-var presence.
 - The browser_registry resolves an active provider in the documented
@@ -11,12 +11,12 @@ Covers:
       a typed credentials error)
     * legacy preference walk: browser-use → browserbase (filtered by
       availability)
-    * firecrawl is NOT in the legacy walk — explicit-only
+    * firecrawl and notte are NOT in the legacy walk - explicit-only
     * unknown name falls through to auto-detect
     * ``local`` short-circuits to None
 
-These tests use *real* imports from the plugin modules — no mocking of
-provider classes themselves — so the test catches drift in the ABC
+These tests use *real* imports from the plugin modules - no mocking of
+provider classes themselves - so the test catches drift in the ABC
 interface, the registry, and the plugin glue layer simultaneously.
 Mirrors ``tests/plugins/web/test_web_search_provider_plugins.py`` from
 PR #25182.
@@ -42,6 +42,8 @@ def _clear_browser_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "FIRECRAWL_API_KEY",
         "FIRECRAWL_API_URL",
         "FIRECRAWL_BROWSER_TTL",
+        "NOTTE_API_KEY",
+        "NOTTE_API_URL",
         "TOOL_GATEWAY_DOMAIN",
         "TOOL_GATEWAY_USER_TOKEN",
     ):
@@ -72,14 +74,14 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestBundledPluginsRegister:
-    """All three bundled browser plugins discover and register correctly."""
+    """All bundled browser plugins discover and register correctly."""
 
-    def test_all_three_plugins_present_in_registry(self) -> None:
+    def test_all_plugins_present_in_registry(self) -> None:
         _ensure_plugins_loaded()
         from agent.browser_registry import list_providers
 
         names = sorted(p.name for p in list_providers())
-        assert names == ["browser-use", "browserbase", "firecrawl"]
+        assert names == ["browser-use", "browserbase", "firecrawl", "notte"]
 
     @pytest.mark.parametrize(
         "plugin_name,expected_display",
@@ -87,6 +89,7 @@ class TestBundledPluginsRegister:
             ("browserbase", "Browserbase"),
             ("browser-use", "Browser Use"),
             ("firecrawl", "Firecrawl"),
+            ("notte", "Notte"),
         ],
     )
     def test_each_plugin_has_name_and_display_name(
@@ -102,7 +105,7 @@ class TestBundledPluginsRegister:
 
     @pytest.mark.parametrize(
         "plugin_name",
-        ["browserbase", "browser-use", "firecrawl"],
+        ["browserbase", "browser-use", "firecrawl", "notte"],
     )
     def test_each_plugin_has_setup_schema(self, plugin_name: str) -> None:
         """``get_setup_schema()`` returns a dict the picker can consume."""
@@ -121,7 +124,7 @@ class TestBundledPluginsRegister:
 
     @pytest.mark.parametrize(
         "plugin_name",
-        ["browserbase", "browser-use", "firecrawl"],
+        ["browserbase", "browser-use", "firecrawl", "notte"],
     )
     def test_each_plugin_implements_full_lifecycle(self, plugin_name: str) -> None:
         """The ABC's three lifecycle methods are all overridden."""
@@ -199,6 +202,130 @@ class TestIsAvailable:
         monkeypatch.setenv("FIRECRAWL_API_KEY", "key")
         assert p.is_available() is True
 
+    def test_notte_requires_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _ensure_plugins_loaded()
+        from agent.browser_registry import get_provider
+
+        p = get_provider("notte")
+        assert p is not None
+        assert p.is_available() is False
+        monkeypatch.setenv("NOTTE_API_KEY", "key")
+        assert p.is_available() is True
+
+
+# ---------------------------------------------------------------------------
+# Notte lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestNotteLifecycle:
+    """Notte provider maps Hermes sessions to the Notte REST API."""
+
+    def test_notte_create_session_posts_start_and_returns_cdp(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from plugins.browser.notte import provider as notte_provider
+
+        class _Response:
+            ok = True
+            status_code = 200
+
+            def json(self) -> dict:
+                return {
+                    "session_id": "sess_123",
+                    "cdp_url": "wss://api.notte.cc/sessions/sess_123/cdp",
+                }
+
+        calls = []
+
+        def _post(url, *, headers, json, timeout):
+            calls.append((url, headers, json, timeout))
+            return _Response()
+
+        monkeypatch.setenv("NOTTE_API_KEY", "key")
+        monkeypatch.setenv("NOTTE_API_URL", "https://api.example.test/")
+        monkeypatch.setenv("NOTTE_PROXIES", "us")
+        monkeypatch.setenv("NOTTE_MAX_DURATION_MINUTES", "15")
+        monkeypatch.setenv("NOTTE_IDLE_TIMEOUT_MINUTES", "3")
+        monkeypatch.setattr(notte_provider.requests, "post", _post)
+
+        session = notte_provider.NotteBrowserProvider().create_session("task")
+
+        assert session["bb_session_id"] == "sess_123"
+        assert session["session_name"] == "sess_123"
+        assert session["cdp_url"] == "wss://api.notte.cc/sessions/sess_123/cdp"
+        assert session["features"]["notte"] is True
+        assert session["features"]["proxies"] == "us"
+        assert session["features"]["max_duration_minutes"] == 15
+        assert session["features"]["idle_timeout_minutes"] == 3
+        assert calls == [
+            (
+                "https://api.example.test/sessions/start",
+                {
+                    "Authorization": "Bearer key",
+                    "Content-Type": "application/json",
+                },
+                {
+                    "proxies": "us",
+                    "max_duration_minutes": 15,
+                    "idle_timeout_minutes": 3,
+                },
+                30,
+            )
+        ]
+
+    def test_notte_create_session_redacts_token_from_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from plugins.browser.notte import provider as notte_provider
+
+        secret = "notte_org_1234567890abcdef"
+
+        class _Response:
+            ok = False
+            status_code = 401
+            text = f'{{"error":"Token {secret} is invalid"}}'
+            reason = "Unauthorized"
+
+        def _post(url, *, headers, json, timeout):
+            return _Response()
+
+        monkeypatch.setenv("NOTTE_API_KEY", secret)
+        monkeypatch.setattr(notte_provider.requests, "post", _post)
+
+        with pytest.raises(RuntimeError) as exc_info:
+            notte_provider.NotteBrowserProvider().create_session("task")
+
+        message = str(exc_info.value)
+        assert secret not in message
+        assert "[REDACTED]" in message
+
+    def test_notte_close_session_deletes_stop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from plugins.browser.notte import provider as notte_provider
+
+        class _Response:
+            status_code = 204
+
+        calls = []
+
+        def _delete(url, *, headers, timeout):
+            calls.append((url, headers, timeout))
+            return _Response()
+
+        monkeypatch.setenv("NOTTE_API_KEY", "key")
+        monkeypatch.setattr(notte_provider.requests, "delete", _delete)
+
+        assert notte_provider.NotteBrowserProvider().close_session("sess_123") is True
+        assert calls == [
+            (
+                "https://api.notte.cc/sessions/sess_123/stop",
+                {"Authorization": "Bearer key"},
+                10,
+            )
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Registry resolution semantics
@@ -244,6 +371,15 @@ class TestRegistryResolution:
         provider = _resolve("firecrawl")
         assert provider is not None
         assert provider.name == "firecrawl"
+
+    def test_explicit_notte_returns_provider_even_when_unavailable(self) -> None:
+        """Notte behaves the same as other explicit-only providers."""
+        _ensure_plugins_loaded()
+        from agent.browser_registry import _resolve
+
+        provider = _resolve("notte")
+        assert provider is not None
+        assert provider.name == "notte"
 
     def test_explicit_unknown_falls_back_to_auto_detect(self) -> None:
         """Rule 1 miss: unknown name → fall through to legacy walk."""
@@ -299,7 +435,18 @@ class TestRegistryResolution:
 
         monkeypatch.setenv("FIRECRAWL_API_KEY", "k")
 
-        # Only firecrawl is_available() — but it's not in the legacy walk.
+        # Only firecrawl is_available() - but it's not in the legacy walk.
+        assert _resolve(None) is None
+
+    def test_notte_not_in_legacy_walk_even_when_only_one_available(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Third-party-style providers are explicit-only by default."""
+        _ensure_plugins_loaded()
+        from agent.browser_registry import _resolve
+
+        monkeypatch.setenv("NOTTE_API_KEY", "k")
+
         assert _resolve(None) is None
 
 
@@ -313,7 +460,7 @@ class TestLegacyAbcAliases:
 
     @pytest.mark.parametrize(
         "plugin_name",
-        ["browserbase", "browser-use", "firecrawl"],
+        ["browserbase", "browser-use", "firecrawl", "notte"],
     )
     def test_is_configured_delegates_to_is_available(self, plugin_name: str) -> None:
         _ensure_plugins_loaded()
@@ -329,6 +476,7 @@ class TestLegacyAbcAliases:
             ("browserbase", "Browserbase"),
             ("browser-use", "Browser Use"),
             ("firecrawl", "Firecrawl"),
+            ("notte", "Notte"),
         ],
     )
     def test_provider_name_returns_display_name(
@@ -348,7 +496,7 @@ class TestLegacyAbcAliases:
 
 
 class TestPickerIntegration:
-    """`_plugin_browser_providers()` exposes all three plugins as picker rows."""
+    """`_plugin_browser_providers()` exposes all plugins as picker rows."""
 
     def test_picker_rows_match_registered_plugins(self) -> None:
         _ensure_plugins_loaded()
@@ -356,7 +504,7 @@ class TestPickerIntegration:
 
         rows = _plugin_browser_providers()
         names = sorted(r.get("browser_provider") for r in rows)
-        assert names == ["browser-use", "browserbase", "firecrawl"]
+        assert names == ["browser-use", "browserbase", "firecrawl", "notte"]
 
     def test_picker_rows_carry_post_setup_hook(self) -> None:
         """Every browser plugin row has post_setup='agent_browser' so

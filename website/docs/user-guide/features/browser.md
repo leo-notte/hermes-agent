@@ -12,6 +12,7 @@ Hermes Agent includes a full browser automation toolset with multiple backend op
 - **Browserbase cloud mode** via [Browserbase](https://browserbase.com) for managed cloud browsers and anti-bot tooling
 - **Browser Use cloud mode** via [Browser Use](https://browser-use.com) as an alternative cloud browser provider
 - **Firecrawl cloud mode** via [Firecrawl](https://firecrawl.dev) for cloud browsers with built-in scraping
+- **Notte cloud mode** via [Notte](https://notte.cc) for hosted browser sessions with CDP access
 - **Camofox local mode** via [Camofox](https://github.com/jo-inc/camofox-browser) for local anti-detection browsing (Firefox-based fingerprint spoofing)
 - **Local Chromium-family CDP** — connect browser tools to your own Chrome, Brave, Chromium, or Edge instance using `/browser connect`
 - **Local browser mode** via the `agent-browser` CLI and a local Chromium installation
@@ -24,7 +25,7 @@ Pages are represented as **accessibility trees** (text-based snapshots), making 
 
 Key capabilities:
 
-- **Multi-provider cloud execution** — Browserbase, Browser Use, or Firecrawl — no local browser needed
+- **Multi-provider cloud execution** — Browserbase, Browser Use, Firecrawl, or Notte — no local browser needed
 - **Local Chromium-family integration** — attach to your running Chrome, Brave, Chromium, or Edge browser via CDP for hands-on browsing
 - **Built-in stealth** — random fingerprints, CAPTCHA solving, residential proxies (Browserbase)
 - **Session isolation** — each task gets its own browser session
@@ -84,6 +85,34 @@ FIRECRAWL_API_URL=http://localhost:3002
 
 # Session TTL in seconds (default: 300)
 FIRECRAWL_BROWSER_TTL=600
+```
+
+### Notte cloud mode
+
+To use Notte as your cloud browser provider, add:
+
+```bash
+# Add to ~/.hermes/.env
+NOTTE_API_KEY=***
+```
+
+Get your API key at [console.notte.cc](https://console.notte.cc). Then select Notte as your browser provider:
+
+```bash
+hermes setup tools
+# → Browser Automation → Notte
+```
+
+Optional settings:
+
+```bash
+# Self-hosted or alternate Notte API URL (default: https://api.notte.cc)
+NOTTE_API_URL=https://api.notte.cc
+
+# Optional session knobs
+NOTTE_PROXIES=true  # or a country code, e.g. us
+NOTTE_MAX_DURATION_MINUTES=15
+NOTTE_IDLE_TIMEOUT_MINUTES=3
 ```
 
 ### Hybrid routing: cloud for public URLs, local for LAN/localhost

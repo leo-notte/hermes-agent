@@ -1,0 +1,7 @@
+name: browser-notte
+version: 1.0.0
+description: "Notte (https://notte.cc) cloud browser backend. Requires NOTTE_API_KEY. Provides hosted browser sessions with CDP access."
+author: NousResearch
+kind: backend
+provides_browser_providers:
+  - notte
